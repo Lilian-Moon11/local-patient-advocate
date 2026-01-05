@@ -1,0 +1,22 @@
+# --- Python & System Junk ---
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# --- Streamlit & Secrets ---
+.streamlit/secrets.toml
+.env
+
+# --- Patient Data (Safety Lock) ---
+*.db
+*.sqlite
+*.csv
+*.json
+/data/
+/records/
+
+# --- Build Files (If we make an EXE later) ---
+dist/
+build/
+*.spec
