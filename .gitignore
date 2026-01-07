@@ -4,19 +4,29 @@ __pycache__/
 *.py[cod]
 .DS_Store
 
-# --- Streamlit & Secrets ---
-.streamlit/secrets.toml
+# --- Environment Variables ---
 .env
 
-# --- Patient Data (Safety Lock) ---
+# --- Patient Data (CRITICAL SAFETY LOCK) ---
+# Database files
 *.db
 *.sqlite
+*.sqlite3
+
+# Document Intake & Exports (Phase 2)
+*.pdf
+*.xlsx
+*.xls
 *.csv
 *.json
+*.enc
+
+# Directory Locks
 /data/
 /records/
+/exports/
 
-# --- Build Files (If we make an EXE later) ---
+# --- Build Files (Flet & PyInstaller) ---
 dist/
 build/
 *.spec
