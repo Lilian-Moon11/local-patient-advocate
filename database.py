@@ -1,63 +1,79 @@
-import os
 import sqlite3
-from hashlib import pbkdf2_hmac
-import binascii
+import os
+import sys
+import hashlib
 
-# Try to import sqlcipher3, but fall back to standard sqlite3 for testing if needed
-# Note: Standard sqlite3 will NOT be encrypted, this is just to prevent crash on install errors.
-try:
-    from sqlcipher3 import dbapi2 as sqlcipher
-except ImportError:
-    print("WARNING: sqlcipher3 not found. Using standard sqlite3 (NOT ENCRYPTED).")
-    import sqlite3 as sqlcipher
-
-DB_FILENAME = "medical_records.db"
-
-def get_derived_key(password: str, salt: bytes) -> str:
-    """
-    Derives a 64-character hex key from the password using PBKDF2.
-    This creates a secure key from the user's password[cite: 83].
-    """
-    kdf = pbkdf2_hmac(
-        'sha256',
-        password.encode('utf-8'),
-        salt,
-        100000 # 100,000 iterations for security
-    )
-    return binascii.hexlify(kdf).decode('utf-8')
-
-def init_db(password: str):
-    """
-    Initializes the encrypted database connection.
-    """
-    # In production, salt should be random and stored, but for this local app 
-    # we use a fixed application salt to allow the user to recover data with just their password.
-    salt = b'local_medical_app_salt' 
-    key = get_derived_key(password, salt)
-
-    conn = sqlcipher.connect(DB_FILENAME)
-    cursor = conn.cursor()
-    
-    # EXECUTE ENCRYPTION PRAGMA [cite: 84]
-    cursor.execute(f"PRAGMA key = '{key}';")
-    
-    # Try to access the database to verify the key works
+def resource_path(relative_path):
+    """ Get absolute path to resource for development and for PyInstaller (the .exe file). """
     try:
-        cursor.execute("SELECT count(*) FROM sqlite_master;")
-    except Exception as e:
-        conn.close()
-        raise ValueError("Invalid password or corrupt database.") from e
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
 
-    # Create the Patients table (Phase 1 Requirement)
-    create_patients_table = """
-    CREATE TABLE IF NOT EXISTS patients (
-        id TEXT PRIMARY KEY,
-        first_name TEXT NOT NULL,
-        last_name TEXT NOT NULL,
-        dob TEXT,
-        encrypted_notes TEXT
-    );
+    return os.path.join(base_path, relative_path)
+
+def init_db(input_password):
     """
-    cursor.execute(create_patients_table)
+    Connects to the database.
+    - If it's the first run, it sets the password.
+    - If it's a subsequent run, it checks the password.
+    """
+    
+    # Use resource_path to ensure we find the DB even if packaged later
+    db_path = resource_path("patients.db")
+    
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    cursor = conn.cursor()
+
+    # Create a hidden table to store the password hash (simulated security)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS security (
+            id INTEGER PRIMARY KEY,
+            password_hash TEXT
+        )
+    """)
+    
+    # Check if a password has been set previously
+    cursor.execute("SELECT password_hash FROM security WHERE id = 1")
+    stored_data = cursor.fetchone()
+
+    # Hash the input password for comparison
+    input_hash = hashlib.sha256(input_password.encode()).hexdigest()
+
+    if stored_data is None:
+        # CASE 1: First time run (Setup)
+        cursor.execute("INSERT INTO security (id, password_hash) VALUES (1, ?)", (input_hash,))
+        conn.commit()
+    else:
+        # CASE 2: Login attempt
+        stored_hash = stored_data[0]
+        if input_hash != stored_hash:
+            conn.close()
+            raise ValueError("Invalid Password.")
+    
+    # If we get here, login was successful
+    # Ensure patient table exists for the dashboard
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS patients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            dob TEXT,
+            notes TEXT
+        )
+    """)
     conn.commit()
+    
     return conn
+
+def add_patient(conn, name, dob, notes):
+    """ Save a new patient to the database """
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO patients (name, dob, notes) VALUES (?, ?, ?)", (name, dob, notes))
+    conn.commit()
+
+def get_patients(conn):
+    """ Get all patients to display in a list """
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, dob FROM patients")
+    return cursor.fetchall()

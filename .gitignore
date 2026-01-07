@@ -1,3 +1,4 @@
+#Prevents patient files from getting uploaded to the github/version control
 # --- Python & System Junk ---
 venv/
 __pycache__/
