@@ -3,146 +3,202 @@
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
 # published by the Free Software Foundation, either version 3 of the
-# License, or (at your option) any later version.
+# License, or any later version.
 
 import flet as ft
-from database import init_db, add_patient, get_patients
+from database import init_db, create_profile, get_profile, update_profile
 
 def main(page: ft.Page):
-    # 1. Setup the window
     page.title = "Local Patient Advocate"
     page.window_width = 1000
     page.window_height = 800
+    page.theme_mode = ft.ThemeMode.LIGHT
     
+    # --- STATE ---
+    # Store the current profile data here once loaded
+    # Format: (id, name, dob, notes)
+    page.current_profile = None 
+
     # --- UI COMPONENTS ---
     
-    # Create the error text (hidden at first)
+    # LOGIN SCREEN
     error_text = ft.Text(color=ft.Colors.RED, visible=False)
-    
-    # Create the password box
     password_field = ft.TextField(
         label="Database Password", 
         password=True, 
-        can_reveal_password=True
+        can_reveal_password=True,
+        on_submit=lambda e: attempt_login(e)
     )
 
-    # DASHBOARD COMPONENTS (The Form)
-    name_input = ft.TextField(label="Patient Name", width=300)
-    dob_input = ft.TextField(label="Date of Birth (YYYY-MM-DD)", width=300)
-    notes_input = ft.TextField(label="Medical Notes", multiline=True, width=300)
-    
-    # The list where we will show saved patients
-    patient_list_view = ft.ListView(expand=True, spacing=10)
+    # PROFILE FORM (Used for both creating and editing)
+    name_input = ft.TextField(label="Full Name", width=400)
+    dob_input = ft.TextField(label="Date of Birth (YYYY-MM-DD)", width=400)
+    notes_input = ft.TextField(label="Medical Notes / Conditions", multiline=True, width=400, height=150)
 
     # --- ACTIONS ---
 
-    def refresh_patient_list():
-        """ clear the list and re-fetch from database """
-        patient_list_view.controls.clear()
-        patients = get_patients(page.db_connection)
-        for p in patients:
-            # p[0] is name, p[1] is dob
-            patient_list_view.controls.append(
-                ft.ListTile(
-                    leading=ft.Icon(ft.Icons.PERSON),
-                    title=ft.Text(p[0]),
-                    subtitle=ft.Text(f"DOB: {p[1]}")
-                )
-            )
-        page.update()
-
-    def save_patient_click(e):
-        try:
-            if not name_input.value:
-                raise ValueError("Name is required")
-            
-            # Save to database
-            add_patient(page.db_connection, name_input.value, dob_input.value, notes_input.value)
-            
-            # Clear inputs
-            name_input.value = ""
-            dob_input.value = ""
-            notes_input.value = ""
-            
-            # Show success and refresh list
-            page.snack_bar = ft.SnackBar(ft.Text("Patient Saved!"))
-            page.snack_bar.open = True
-            
-            refresh_patient_list()
-            page.update()
-            
-        except Exception as ex:
-            page.snack_bar = ft.SnackBar(ft.Text(f"Error: {str(ex)}"), bgcolor="red")
-            page.snack_bar.open = True
-            page.update()
-
-    # Define what happens when you click "Unlock"
     def attempt_login(e):
         try:
             if not password_field.value:
                 raise ValueError("Please enter a password.")
             
-            # Connect to DB
             page.db_connection = init_db(password_field.value)
             
-            # CLEAR the screen and show the Dashboard
-            page.clean()
-            show_dashboard()
+            # Login Success! Now check if we have a profile.
+            load_dashboard_logic()
             
         except Exception as ex:
+            print(f"CRITICAL ERROR: {ex}") 
             error_text.value = f"Error: {str(ex)}"
             error_text.visible = True
             page.update()
 
-    # Define the Dashboard (We show this only after login)
-    def show_dashboard():
-        # Load any existing patients immediately
-        refresh_patient_list()
+    def load_dashboard_logic():
+        """ Decides whether to show the 'Create Profile' form or the 'Dashboard' """
+        page.clean()
         
+        # Check database for a profile
+        page.current_profile = get_profile(page.db_connection)
+        
+        if page.current_profile is None:
+            show_create_profile_view()
+        else:
+            show_main_dashboard()
+
+        page.update()
+
+    def save_profile_click(e):
+        try:
+            print("Attempting to create profile...") # Debug print
+            if not name_input.value:
+                raise ValueError("Name is required")
+            
+            # Create the profile in SQL
+            create_profile(page.db_connection, name_input.value, dob_input.value, notes_input.value)
+            print("Profile created in DB. Loading dashboard...") # Debug print
+            
+            # Try to load the UI
+            load_dashboard_logic() 
+            print("Dashboard loaded.") # Debug print
+            
+        except Exception as ex:
+            # THIS IS THE KEY PART: Print the error to the terminal
+            print(f"CRITICAL DASHBOARD ERROR: {ex}")
+            import traceback
+            traceback.print_exc()
+            
+            page.snack_bar = ft.SnackBar(ft.Text(f"Error: {str(ex)}"), bgcolor="red")
+            page.snack_bar.open = True
+            page.update()
+
+    def edit_mode_toggle(e):
+        """ Switch back to the form to edit details """
+        # Pre-fill the form with current data
+        name_input.value = page.current_profile[1]
+        dob_input.value = page.current_profile[2]
+        notes_input.value = page.current_profile[3]
+        
+        # Override the save button to UPDATE instead of CREATE
+        def update_click(ev):
+            update_profile(page.db_connection, page.current_profile[0], name_input.value, dob_input.value, notes_input.value)
+            load_dashboard_logic()
+
+        page.clean()
+        page.add(
+            ft.Column([
+                ft.Text("Edit Profile", size=30, weight="bold"),
+                name_input,
+                dob_input,
+                notes_input,
+                ft.Button("Save Changes", on_click=update_click),
+                ft.Button("Cancel", on_click=lambda _: load_dashboard_logic(), color="red")
+            ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+        )
+
+    # --- VIEWS ---
+
+    def show_create_profile_view():
+        """ The Onboarding Screen """
+        page.add(
+            ft.Container(
+                content=ft.Column([
+                    ft.Icon(ft.Icons.PERSON_ADD, size=64, color=ft.Colors.BLUE),
+                    ft.Text("Welcome!", size=30, weight="bold"),
+                    ft.Text("Let's set up the primary patient profile.", size=16),
+                    ft.Divider(),
+                    name_input,
+                    dob_input,
+                    notes_input,
+                    ft.Button("Create Profile", on_click=save_profile_click)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                alignment=ft.Alignment(0, 0),
+                expand=True
+            )
+        )
+
+    def show_main_dashboard():
+        """ The Single-User Unified Interface """
+        # Unpack data for readability
+        p_name = page.current_profile[1]
+        p_dob = page.current_profile[2]
+        p_notes = page.current_profile[3]
+
         page.add(
             ft.Row([
-                # Sidebar (Visual only for now)
+                # SIDEBAR (Navigation)
                 ft.NavigationRail(
                     selected_index=0,
                     destinations=[
-                        ft.NavigationRailDestination(icon=ft.Icons.PEOPLE, label="Patients"),
+                        ft.NavigationRailDestination(icon=ft.Icons.DASHBOARD, label="Overview"),
+                        ft.NavigationRailDestination(icon=ft.Icons.FOLDER, label="Documents"),
                         ft.NavigationRailDestination(icon=ft.Icons.SETTINGS, label="Settings"),
                     ]
                 ),
                 ft.VerticalDivider(width=1),
                 
-                # Main Content Area
-                ft.Row([
-                    # LEFT COLUMN: Input Form
-                    ft.Column([
-                        ft.Text("Add New Patient", size=20, weight="bold"),
-                        name_input,
-                        dob_input,
-                        notes_input,
-                        ft.Button("Save Patient", on_click=save_patient_click)
-                    ], alignment=ft.MainAxisAlignment.START, spacing=20),
-                    
-                    ft.VerticalDivider(width=1),
-                    
-                    # RIGHT COLUMN: Saved List
-                    ft.Column([
-                        ft.Text("Saved Records", size=20, weight="bold"),
-                        patient_list_view
+                # MAIN CONTENT AREA
+                ft.Container(
+                    padding=20,  # Apply padding here instead
+                    expand=True,
+                    content=ft.Column([
+                        # Header: The Patient Card
+                        ft.Container(
+                            content=ft.Row([
+                                ft.Icon(ft.Icons.ACCOUNT_CIRCLE, size=80, color=ft.Colors.BLUE_GREY),
+                                ft.Column([
+                                    ft.Text(p_name, size=30, weight="bold"),
+                                    ft.Text(f"DOB: {p_dob}", size=16, color="grey"),
+                                ]),
+                                ft.Container(expand=True), # Spacer
+                                ft.IconButton(ft.Icons.EDIT, tooltip="Edit Profile", on_click=edit_mode_toggle)
+                            ]),
+                            padding=20,
+                            bgcolor=ft.Colors.BLUE_50,
+                            border_radius=10
+                        ),
+                        
+                        ft.Divider(),
+                        
+                        # Body: The Medical Notes (Read Only)
+                        ft.Text("Medical Summary / Notes", weight="bold", size=18),
+                        ft.Container(
+                            content=ft.Text(p_notes, size=16),
+                            padding=15,
+                            bgcolor=ft.Colors.GREY_100,
+                            border_radius=5,
+                            expand=True 
+                        )
                     ], expand=True)
-                    
-                ], expand=True, alignment=ft.MainAxisAlignment.START)
+                )
             ], expand=True)
         )
-        page.update()
 
     # --- STARTUP ---
-    # Directly add the login controls to the page immediately
     page.add(
         ft.Column(
             [
                 ft.Icon(ft.Icons.SECURITY, size=64, color=ft.Colors.BLUE),
                 ft.Text("Secure Login", size=30),
-                ft.Text("Enter password to unlock records:"),
                 password_field,
                 ft.Button("Unlock Database", on_click=attempt_login),
                 error_text

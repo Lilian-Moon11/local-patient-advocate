@@ -1,32 +1,41 @@
-import sqlite3
+# Copyright (C) 2026 Lilian-Moon11
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or any later version.
+
+from sqlcipher3 import dbapi2 as sqlite3 
 import os
 import sys
-import hashlib
 
 def resource_path(relative_path):
-    """ Get absolute path to resource for development and for PyInstaller (the .exe file). """
+    """ Get absolute path to resource for dev and .exe """
     try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
-
     return os.path.join(base_path, relative_path)
 
 def init_db(input_password):
-    """
-    Connects to the database.
-    - If it's the first run, it sets the password.
-    - If it's a subsequent run, it checks the password.
-    """
-    
-    # Use resource_path to ensure we find the DB even if packaged later
-    db_path = resource_path("patients.db")
-    
+    """ Initialize DB and check password """
+    db_path = resource_path("medical_records_v1.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
     cursor = conn.cursor()
 
-    # Create a hidden table to store the password hash (simulated security)
+    # --- FIX: Set the Key FIRST, before doing anything else ---
+    cursor.execute(f"PRAGMA key = '{input_password}';")
+    
+    # Try to read the database to verify password is correct
+    try:
+        cursor.execute("SELECT count(*) FROM sqlite_master;")
+    except Exception:
+        conn.close()
+        raise ValueError("Invalid Password or Corrupted Database.")
+
+    # --- NOW it is safe to create tables ---
+    
+    # Security Table (Optional now, but keeping for legacy compatibility)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS security (
             id INTEGER PRIMARY KEY,
@@ -34,26 +43,6 @@ def init_db(input_password):
         )
     """)
     
-    # Check if a password has been set previously
-    cursor.execute("SELECT password_hash FROM security WHERE id = 1")
-    stored_data = cursor.fetchone()
-
-    # Hash the input password for comparison
-    input_hash = hashlib.sha256(input_password.encode()).hexdigest()
-
-    if stored_data is None:
-        # CASE 1: First time run (Setup)
-        cursor.execute("INSERT INTO security (id, password_hash) VALUES (1, ?)", (input_hash,))
-        conn.commit()
-    else:
-        # CASE 2: Login attempt
-        stored_hash = stored_data[0]
-        if input_hash != stored_hash:
-            conn.close()
-            raise ValueError("Invalid Password.")
-    
-    # If we get here, login was successful
-    # Ensure patient table exists for the dashboard
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,18 +51,55 @@ def init_db(input_password):
             notes TEXT
         )
     """)
-    conn.commit()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER,
+            file_name TEXT,
+            file_path TEXT,
+            parsed_text TEXT,
+            upload_date TEXT,
+            FOREIGN KEY(patient_id) REFERENCES patients(id)
+        )
+    """)
     
+    conn.commit()
     return conn
 
-def add_patient(conn, name, dob, notes):
-    """ Save a new patient to the database """
+def create_profile(conn, name, dob, notes):
+    """ Create the primary user profile """
     cursor = conn.cursor()
     cursor.execute("INSERT INTO patients (name, dob, notes) VALUES (?, ?, ?)", (name, dob, notes))
     conn.commit()
 
-def get_patients(conn):
-    """ Get all patients to display in a list """
+def get_profile(conn):
+    """ 
+    Get the SINGLE primary profile. 
+    Returns None if no profile exists yet.
+    """
     cursor = conn.cursor()
-    cursor.execute("SELECT name, dob FROM patients")
+    # We limit to 1 because we are focusing on a single user interface right now
+    cursor.execute("SELECT id, name, dob, notes FROM patients LIMIT 1")
+    return cursor.fetchone()
+
+def update_profile(conn, profile_id, name, dob, notes):
+    """ Update the existing profile """
+    cursor = conn.cursor()
+    cursor.execute("UPDATE patients SET name=?, dob=?, notes=? WHERE id=?", (name, dob, notes, profile_id))
+    conn.commit()
+
+def add_document(conn, patient_id, file_name, file_path, upload_date):
+    """ Save a document reference to the database """
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO documents (patient_id, file_name, file_path, upload_date)
+        VALUES (?, ?, ?, ?)
+    """, (patient_id, file_name, file_path, upload_date))
+    conn.commit()
+
+def get_patient_documents(conn, patient_id):
+    """ Retrieve all documents for a specific patient """
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_name, upload_date, file_path FROM documents WHERE patient_id = ?", (patient_id,))
     return cursor.fetchall()
