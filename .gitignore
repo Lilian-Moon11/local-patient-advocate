@@ -16,6 +16,8 @@ __pycache__/
 
 # Document Intake & Exports (Phase 2)
 *.pdf
+*.doc
+*.docx
 *.xlsx
 *.xls
 *.csv
@@ -26,6 +28,10 @@ __pycache__/
 /data/
 /records/
 /exports/
+
+# --- Logs ---
+*.log
+logs/
 
 # --- Build Files (Flet & PyInstaller) ---
 dist/
