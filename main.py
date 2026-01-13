@@ -19,6 +19,10 @@ from database import (
     update_profile,
     add_document,
     get_patient_documents,
+    list_field_definitions,
+    ensure_field_definition,
+    get_patient_field_map,
+    upsert_patient_field_value,
 )
 
 
@@ -221,6 +225,141 @@ def main(page: ft.Page):
             )
         )
 
+    def show_patient_info_view():
+        patient = page.current_profile
+        patient_id = patient[0]
+
+        defs = list_field_definitions(page.db_connection)
+        value_map = get_patient_field_map(page.db_connection, patient_id)
+
+        def save_value(field_key: str, tf: ft.TextField, src_text: ft.Text, upd_text: ft.Text):
+            upsert_patient_field_value(
+                page.db_connection,
+                patient_id,
+                field_key,
+                tf.value or "",
+                source="user",
+            )
+
+            # Update only this row (no full refresh)
+            src_text.value = "user"
+            upd_text.value = datetime.now().strftime("%Y-%m-%d %H:%M")
+            src_text.update()
+            upd_text.update()
+
+            show_snack("Saved.", "green")
+
+        def add_field_dialog(e):
+            key_tf = ft.TextField(label="Field key (e.g., patient.employer)", width=400)
+            label_tf = ft.TextField(label="Label (e.g., Employer)", width=400)
+            cat_tf = ft.TextField(label="Category", value="General", width=400)
+
+            def do_add(ev):
+                if not key_tf.value or not label_tf.value:
+                    show_snack("Field key and label are required.", "red")
+                    return
+
+                ensure_field_definition(
+                    page.db_connection,
+                    key_tf.value.strip(),
+                    label_tf.value.strip(),
+                    category=cat_tf.value.strip() or "General",
+                )
+
+                page.dialog.open = False
+                page.update()
+                show_snack("Field added.", "green")
+
+                # Here we DO need a refresh so the new field shows up
+                load_dashboard_logic()
+
+            page.dialog = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Add Patient Info Field"),
+                content=ft.Column([key_tf, label_tf, cat_tf], tight=True),
+                actions=[
+                    ft.TextButton(
+                        "Cancel",
+                        on_click=lambda _: (setattr(page.dialog, "open", False), page.update()),
+                    ),
+                    ft.Button("Add", on_click=do_add),
+                ],
+            )
+            page.dialog.open = True
+            page.update()
+
+        rows = []
+        for field_key, label, data_type, category, is_sensitive in defs:
+            existing = value_map.get(field_key, {})
+            val = existing.get("value") or ""
+            src = existing.get("source") or ""
+            upd = existing.get("updated_at") or ""
+
+            value_tf = ft.TextField(value=val, dense=True, width=320)
+
+            # These are the per-row controls we update after save
+            src_text = ft.Text(src)
+            upd_text = ft.Text(upd)
+
+            rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(category)),
+                        ft.DataCell(ft.Text(label)),
+                        ft.DataCell(value_tf),
+                        ft.DataCell(src_text),
+                        ft.DataCell(upd_text),
+                        ft.DataCell(
+                            ft.IconButton(
+                                ft.Icons.SAVE,
+                                tooltip="Save",
+                                on_click=lambda e, k=field_key, tf=value_tf, st=src_text, ut=upd_text: save_value(k, tf, st, ut),
+                            )
+                        ),
+                    ]
+                )
+            )
+
+        return ft.Container(
+            padding=20,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Text("Patient Info", size=24, weight="bold"),
+                            ft.Container(expand=True),
+                            ft.Button("Add Field", icon=ft.Icons.ADD, on_click=add_field_dialog),
+                        ]
+                    ),
+
+                    ft.Container(
+                        content=ft.Text(
+                            "Tip: You can fill multiple fields. Click the 💾 icon to save a field. "
+                            "Unsaved fields will stay until you navigate away.",
+                            color=ft.Colors.BLUE_GREY,
+                        ),
+                        padding=10,
+                        bgcolor=ft.Colors.BLUE_50,
+                        border_radius=8,
+                    ),
+
+                    ft.Divider(),
+                    ft.DataTable(
+                        columns=[
+                            ft.DataColumn(ft.Text("Category")),
+                            ft.DataColumn(ft.Text("Field")),
+                            ft.DataColumn(ft.Text("Value")),
+                            ft.DataColumn(ft.Text("Source")),
+                            ft.DataColumn(ft.Text("Updated")),
+                            ft.DataColumn(ft.Text("")),
+                        ],
+                        rows=rows,
+                    ),
+                ]
+            ),
+        )
+   
+
     def show_main_dashboard():
         content_area = ft.Container(expand=True, padding=20)
 
@@ -235,9 +374,22 @@ def main(page: ft.Page):
             min_width=100,
             min_extended_width=200,
             destinations=[
-                ft.NavigationRailDestination(icon=ft.Icons.DASHBOARD, label="Overview"),
-                ft.NavigationRailDestination(icon=ft.Icons.FOLDER, label="Documents"),
-                ft.NavigationRailDestination(icon=ft.Icons.SETTINGS, label="Settings"),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.DASHBOARD,
+                    label="Overview",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.BADGE,
+                    label="Patient Info",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.FOLDER,
+                    label="Documents",
+                ),
+                ft.NavigationRailDestination(
+                    icon=ft.Icons.SETTINGS,
+                    label="Settings",
+                ),
             ],
             on_change=nav_change,
         )
@@ -289,8 +441,11 @@ def main(page: ft.Page):
                 ),
             )
 
-        # 1: DOCUMENTS
         elif index == 1:
+            return show_patient_info_view()
+    
+        # 1: DOCUMENTS
+        elif index == 2:
             docs = get_patient_documents(page.db_connection, patient[0])
 
             rows = []

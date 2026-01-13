@@ -8,6 +8,7 @@
 from sqlcipher3 import dbapi2 as sqlite3 
 import os
 import sys
+from datetime import datetime
 
 def resource_path(relative_path):
     """ Get absolute path to resource for dev and .exe """
@@ -16,6 +17,51 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+def ensure_field_definition(conn, field_key, label, data_type="text", category="General", is_sensitive=0):
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO field_definitions
+            (field_key, label, data_type, category, is_sensitive, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (field_key, label, data_type, category, is_sensitive, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+
+
+def list_field_definitions(conn):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT field_key, label, data_type, category, is_sensitive
+        FROM field_definitions
+        ORDER BY category, label
+    """)
+    return cur.fetchall()
+
+
+def get_patient_field_map(conn, patient_id):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT field_key, value_text, source, updated_at
+        FROM patient_field_values
+        WHERE patient_id = ?
+    """, (patient_id,))
+    rows = cur.fetchall()
+    return {k: {"value": v, "source": s, "updated_at": u} for (k, v, s, u) in rows}
+
+
+def upsert_patient_field_value(conn, patient_id, field_key, value_text, source="user"):
+    cur = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cur.execute("""
+        INSERT INTO patient_field_values (patient_id, field_key, value_text, source, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(patient_id, field_key)
+        DO UPDATE SET
+            value_text=excluded.value_text,
+            source=excluded.source,
+            updated_at=excluded.updated_at
+    """, (patient_id, field_key, value_text, source, now))
+    conn.commit()
 
 def init_db(input_password):
     """ Initialize DB and check password """
@@ -63,6 +109,41 @@ def init_db(input_password):
             FOREIGN KEY(patient_id) REFERENCES patients(id)
         )
     """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS field_definitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        field_key TEXT UNIQUE NOT NULL,
+        label TEXT NOT NULL,
+        data_type TEXT NOT NULL DEFAULT 'text',
+        category TEXT NOT NULL DEFAULT 'General',
+        is_sensitive INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT
+    )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS patient_field_values (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            field_key TEXT NOT NULL,
+            value_text TEXT,
+            source TEXT NOT NULL DEFAULT 'user',
+            updated_at TEXT,
+            UNIQUE(patient_id, field_key),
+            FOREIGN KEY(patient_id) REFERENCES patients(id)
+        )
+    """)
+
+    defaults = [
+        ("patient.phone", "Phone", "phone", "Demographics", 0),
+        ("patient.email", "Email", "email", "Demographics", 0),
+        ("patient.address", "Address", "text", "Demographics", 0),
+        ("insurance.member_id", "Insurance Member ID", "text", "Insurance", 1),
+        ("insurance.group_id", "Insurance Group ID", "text", "Insurance", 1),
+    ]
+    for k, label, dt, cat, sens in defaults:
+        ensure_field_definition(conn, k, label, dt, cat, sens)
     
     conn.commit()
     return conn
