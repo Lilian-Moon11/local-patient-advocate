@@ -23,6 +23,8 @@ from database import (
     ensure_field_definition,
     get_patient_field_map,
     upsert_patient_field_value,
+    get_setting,          
+    set_setting, 
 )
 
 
@@ -30,7 +32,7 @@ def main(page: ft.Page):
     page.title = "Local Patient Advocate"
     page.window.width = 1000
     page.window.height = 800
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.theme_mode = ft.ThemeMode.SYSTEM
 
     # --- STATE ---
     page.current_profile = None
@@ -48,12 +50,80 @@ def main(page: ft.Page):
         except Exception as ex:
             print("SNACK ERROR:", ex, "| message:", message)
 
+    def s(px: int) -> int:
+        return int(px * getattr(page, "ui_scale", 1.0))
+    
+    def is_dark_mode() -> bool:
+        if page.theme_mode == ft.ThemeMode.DARK:
+            return True
+        if page.theme_mode == ft.ThemeMode.LIGHT:
+            return False
+        # SYSTEM: best-effort; if not available, default False
+        return getattr(page, "platform_brightness", None) == ft.Brightness.DARK
+
+    def themed_panel(content, padding=s(15), radius=6):
+        """A theme-safe container that looks good in light/dark, and enforces high-contrast when enabled."""
+        hc = (get_setting(page.db_connection, "ui.high_contrast", "0") == "1") if page.db_connection else False
+
+        if hc:
+            return ft.Container(
+                content=content,
+                padding=padding,
+                bgcolor=ft.Colors.BLACK,
+                border=ft.Border.all(2, ft.Colors.YELLOW),
+                border_radius=radius,
+            )
+
+        # default (theme-friendly): don't hardcode light colors
+        return ft.Container(
+            content=content,
+            padding=padding,
+            bgcolor=None,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT) if hasattr(ft.Colors, "OUTLINE_VARIANT") else None,
+            border_radius=radius,
+        )
+
+    def apply_settings():
+        """Apply theme/accessibility settings from DB to the page."""
+        if not page.db_connection:
+            return
+
+        theme_pref = get_setting(page.db_connection, "ui.theme", "system")  # system|light|dark
+        high_contrast = get_setting(page.db_connection, "ui.high_contrast", "0") == "1"
+        large_text = get_setting(page.db_connection, "ui.large_text", "0") == "1"
+
+        # Theme mode
+        if theme_pref == "dark":
+            page.theme_mode = ft.ThemeMode.DARK
+        elif theme_pref == "light":
+            page.theme_mode = ft.ThemeMode.LIGHT
+        else:
+            page.theme_mode = ft.ThemeMode.SYSTEM  # inherit OS
+
+        # High contrast
+        if high_contrast:
+            page.theme = ft.Theme(color_scheme_seed=ft.Colors.YELLOW)
+        else:
+            page.theme = None
+
+        # ✅ Large text: use explicit UI scale (reliable with your hard-coded sizes)
+        page.ui_scale = 1.25 if large_text else 1.0
+
+        # ✅ Refresh current view WITHOUT resetting NavigationRail index
+        if hasattr(page, "nav_rail") and hasattr(page, "content_area") and page.current_profile is not None:
+            idx = page.nav_rail.selected_index
+            page.content_area.content = get_view_for_index(idx)
+            page.content_area.update()
+
+        page.update()    
+        
     def attempt_login(e):
         try:
             if not password_field.value:
                 raise ValueError("Please enter a password.")
 
             page.db_connection = init_db(password_field.value)
+            apply_settings()
             load_dashboard_logic()
 
         except Exception as ex:
@@ -191,7 +261,7 @@ def main(page: ft.Page):
         page.add(
             ft.Column(
                 [
-                    ft.Text("Edit Profile", size=30, weight="bold"),
+                    ft.Text("Edit Profile", size=s(30), weight="bold"),
                     name_input,
                     dob_input,
                     notes_input,
@@ -209,9 +279,9 @@ def main(page: ft.Page):
             ft.Container(
                 content=ft.Column(
                     [
-                        ft.Icon(ft.Icons.PERSON_ADD, size=64, color=ft.Colors.BLUE),
-                        ft.Text("Welcome!", size=30, weight="bold"),
-                        ft.Text("Let's set up the primary patient profile.", size=16),
+                        ft.Icon(ft.Icons.PERSON_ADD, size=s(64), color=ft.Colors.BLUE),
+                        ft.Text("Welcome!", size=s(30), weight="bold"),
+                        ft.Text("Let's set up the primary patient profile.", size=s(16)),
                         ft.Divider(),
                         name_input,
                         dob_input,
@@ -321,26 +391,25 @@ def main(page: ft.Page):
             )
 
         return ft.Container(
-            padding=20,
+            padding=s(20),
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Text("Patient Info", size=24, weight="bold"),
+                            ft.Text("Patient Info", size=s(24), weight="bold"),
                             ft.Container(expand=True),
                             ft.Button("Add Field", icon=ft.Icons.ADD, on_click=add_field_dialog),
                         ]
                     ),
 
-                    ft.Container(
-                        content=ft.Text(
+                    themed_panel(
+                        ft.Text(
                             "Tip: You can fill multiple fields. Click the 💾 icon to save a field. "
                             "Unsaved fields will stay until you navigate away.",
-                            color=ft.Colors.BLUE_GREY,
+                            size=s(14),
                         ),
-                        padding=10,
-                        bgcolor=ft.Colors.BLUE_50,
-                        border_radius=8,
+                        padding=s(10),
+                        radius=8,
                     ),
 
                     ft.Divider(),
@@ -360,8 +429,78 @@ def main(page: ft.Page):
         )
    
 
+    def show_settings_view():
+        theme_dd = ft.Dropdown(
+            label="Theme",
+            width=300,
+            options=[
+                ft.dropdown.Option("system", "System default"),
+                ft.dropdown.Option("light", "Light"),
+                ft.dropdown.Option("dark", "Dark"),
+            ],
+            value=get_setting(page.db_connection, "ui.theme", "system"),
+        )
+
+        hc_switch = ft.Switch(
+            label="High contrast",
+            value=get_setting(page.db_connection, "ui.high_contrast", "0") == "1",
+        )
+
+        lt_switch = ft.Switch(
+            label="Large text",
+            value=get_setting(page.db_connection, "ui.large_text", "0") == "1",
+        )
+
+        def save_settings(e):
+            set_setting(page.db_connection, "ui.theme", theme_dd.value or "system")
+            set_setting(page.db_connection, "ui.high_contrast", "1" if hc_switch.value else "0")
+            set_setting(page.db_connection, "ui.large_text", "1" if lt_switch.value else "0")
+            apply_settings()
+            show_snack("Settings saved.", "green")
+
+        def reset_settings(e):
+            set_setting(page.db_connection, "ui.theme", "system")
+            set_setting(page.db_connection, "ui.high_contrast", "0")
+            set_setting(page.db_connection, "ui.large_text", "0")
+
+            theme_dd.value = "system"
+            hc_switch.value = False
+            lt_switch.value = False
+            theme_dd.update()
+            hc_switch.update()
+            lt_switch.update()
+
+            apply_settings()
+            show_snack("Settings reset.", "blue")
+
+        return ft.Container(
+            padding=s(20),
+            content=ft.Column(
+                [
+                    ft.Text("Settings", size=s(24), weight="bold"),
+                    ft.Divider(),
+                    theme_dd,
+                    hc_switch,
+                    lt_switch,
+                    ft.Row(
+                        [
+                            ft.Button("Save", icon=ft.Icons.SAVE, on_click=save_settings),
+                            ft.Button("Reset", icon=ft.Icons.RESTART_ALT, on_click=reset_settings),
+                        ]
+                    ),
+                    ft.Divider(),
+                    ft.Text(
+                        "Tip: “System default” follows your Windows/macOS theme automatically.",
+                        color=ft.Colors.BLUE_GREY,
+                        size=s(14)
+                    ),
+                ],
+                tight=True,
+            ),
+        )
+
     def show_main_dashboard():
-        content_area = ft.Container(expand=True, padding=20)
+        content_area = ft.Container(expand=True, padding=s(20))
 
         def nav_change(e):
             index = e.control.selected_index
@@ -394,6 +533,9 @@ def main(page: ft.Page):
             on_change=nav_change,
         )
 
+        page.nav_rail = rail
+        page.content_area = content_area
+
         content_area.content = get_view_for_index(0)
 
         page.add(
@@ -413,16 +555,16 @@ def main(page: ft.Page):
         # 0: OVERVIEW
         if index == 0:
             return ft.Container(
-                padding=20,
+                padding=s(20),
                 content=ft.Column(
                     [
                         ft.Row(
                             [
-                                ft.Icon(ft.Icons.ACCOUNT_CIRCLE, size=80, color=ft.Colors.BLUE_GREY),
+                                ft.Icon(ft.Icons.ACCOUNT_CIRCLE, size=s(80), color=ft.Colors.BLUE_GREY),
                                 ft.Column(
                                     [
-                                        ft.Text(patient[1], size=30, weight="bold"),
-                                        ft.Text(f"DOB: {patient[2]}", size=16, color="grey"),
+                                        ft.Text(patient[1], size=s(30), weight="bold"),
+                                        ft.Text(f"DOB: {patient[2]}", size=s(16)),
                                     ]
                                 ),
                                 ft.Container(expand=True),
@@ -430,13 +572,8 @@ def main(page: ft.Page):
                             ]
                         ),
                         ft.Divider(),
-                        ft.Text("Medical Summary / Notes", weight="bold", size=18),
-                        ft.Container(
-                            content=ft.Text(patient[3] or "", size=16),
-                            padding=15,
-                            bgcolor=ft.Colors.GREY_100,
-                            border_radius=5,
-                        ),
+                        ft.Text("Medical Summary / Notes", weight="bold", size=s(18)),
+                        themed_panel(ft.Text(patient[3] or "", size=s(16)), padding=s(15), radius=6),
                     ]
                 ),
             )
@@ -473,12 +610,12 @@ def main(page: ft.Page):
                 )
 
             return ft.Container(
-                padding=20,
+                padding=s(20),
                 content=ft.Column(
                     [
                         ft.Row(
                             [
-                                ft.Text("Medical Records", size=24, weight="bold"),
+                                ft.Text("Medical Records", size=s(24), weight="bold"),
                                 ft.Container(expand=True),
                                 ft.Button(
                                     "Upload Document",
@@ -501,15 +638,17 @@ def main(page: ft.Page):
                 ),
             )
 
+        elif index == 3:
+            return show_settings_view()
         else:
-            return ft.Text("Settings (Coming Soon)", size=20)
+            return ft.Text("Unknown view", size=s(20))
 
     # --- STARTUP SCREEN ---
     page.add(
         ft.Column(
             [
-                ft.Icon(ft.Icons.SECURITY, size=64, color=ft.Colors.BLUE),
-                ft.Text("Secure Login", size=30),
+                ft.Icon(ft.Icons.SECURITY, size=s(64), color=ft.Colors.BLUE),
+                ft.Text("Secure Login", size=s(30)),
                 password_field,
                 ft.Button("Unlock Database", on_click=attempt_login),
                 error_text,

@@ -81,6 +81,14 @@ def init_db(input_password):
 
     # --- NOW it is safe to create tables ---
     
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+
+    
     # Security Table (Optional now, but keeping for legacy compatibility)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS security (
@@ -184,3 +192,20 @@ def get_patient_documents(conn, patient_id):
     cursor = conn.cursor()
     cursor.execute("SELECT file_name, upload_date, file_path FROM documents WHERE patient_id = ?", (patient_id,))
     return cursor.fetchall()
+
+def get_setting(conn, key, default=None):
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    return row[0] if row else default
+
+def set_setting(conn, key, value):
+    cur = conn.cursor()
+    if value is None:
+        cur.execute("DELETE FROM app_settings WHERE key=?", (key,))
+    else:
+        cur.execute("""
+            INSERT INTO app_settings(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, (key, str(value)))
+    conn.commit()
