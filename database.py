@@ -187,10 +187,27 @@ def add_document(conn, patient_id, file_name, file_path, upload_date):
     """, (patient_id, file_name, file_path, upload_date))
     conn.commit()
 
+def delete_document(conn, document_id):
+    """Delete a document row by id."""
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+    conn.commit()
+
+def get_document_path(conn, document_id):
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_path FROM documents WHERE id = ?", (document_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
 def get_patient_documents(conn, patient_id):
     """ Retrieve all documents for a specific patient """
     cursor = conn.cursor()
-    cursor.execute("SELECT file_name, upload_date, file_path FROM documents WHERE patient_id = ?", (patient_id,))
+    cursor.execute("""
+        SELECT id, file_name, upload_date, file_path
+        FROM documents
+        WHERE patient_id = ?
+        ORDER BY id DESC
+    """, (patient_id,))
     return cursor.fetchall()
 
 def get_setting(conn, key, default=None):

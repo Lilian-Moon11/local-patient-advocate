@@ -25,6 +25,8 @@ from database import (
     upsert_patient_field_value,
     get_setting,          
     set_setting, 
+    delete_document,
+    get_document_path,
 )
 
 
@@ -184,6 +186,93 @@ def main(page: ft.Page):
         path = e.control.data
         asyncio.create_task(open_document(path))
 
+    def delete_document_click(e):
+        data = getattr(e.control, "data", None)
+        if not data or not isinstance(data, (tuple, list)) or len(data) != 2:
+            show_snack("Delete failed: missing document info.", "red")
+            return
+
+        doc_id, file_name = data
+        doc_id = int(doc_id)
+
+        # Prevent double-click stacking multiple dialogs
+        if getattr(page, "_delete_dialog_open", False):
+            return
+        page._delete_dialog_open = True
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Delete document?"),
+            content=ft.Text(
+                f"Are you sure you want to delete '{file_name}'?\n\n"
+                "This removes it from the app and deletes the file from disk."
+            ),
+            actions=[],  # set below so handlers can capture dlg safely
+        )
+
+        def close_dialog(_=None, d=dlg):
+            # Close
+            d.open = False
+            page.update()
+
+            # Remove from overlay (important)
+            if d in page.overlay:
+                page.overlay.remove(d)
+
+            page._delete_dialog_open = False
+            page.update()
+
+        def do_delete(_=None, d=dlg):
+            try:
+                path = get_document_path(page.db_connection, doc_id)
+                if not path:
+                    show_snack("Delete failed: document path not found.", "red")
+                    close_dialog(d=d)
+                    return
+
+                file_deleted = False
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        file_deleted = True
+                    except PermissionError:
+                        file_deleted = False
+                    except Exception:
+                        file_deleted = False
+
+                delete_document(page.db_connection, doc_id)
+
+                # Close dialog before refresh
+                close_dialog(d=d)
+
+                # Refresh documents view
+                if hasattr(page, "nav_rail") and hasattr(page, "content_area"):
+                    page.nav_rail.selected_index = 2
+                    page.content_area.content = get_view_for_index(2)
+                    page.content_area.update()
+
+                if file_deleted:
+                    show_snack(f"Deleted: {file_name}", "blue")
+                else:
+                    show_snack(
+                        f"Removed from list. File could not be deleted (it may be open): {file_name}",
+                        "orange",
+                    )
+
+            except Exception as ex:
+                close_dialog(d=d)
+                show_snack(f"Delete failed: {str(ex)}", "red")
+
+        dlg.actions = [
+            ft.TextButton("Cancel", on_click=close_dialog),
+            ft.Button("Delete", icon=ft.Icons.DELETE, on_click=do_delete),
+        ]
+
+        page.overlay.append(dlg)
+        dlg.open = True
+        page.update()
+
+    
 
     # --- BUSINESS LOGIC ---
     def load_dashboard_logic():
@@ -235,7 +324,12 @@ def main(page: ft.Page):
             upload_date = datetime.now().strftime("%Y-%m-%d %H:%M")
             add_document(page.db_connection, patient_id, file_name, destination, upload_date)
 
-            load_dashboard_logic()
+            # ✅ No full refresh. Rebuild only the current view and preserve navigation state.
+            if hasattr(page, "nav_rail") and hasattr(page, "content_area"):
+                idx = page.nav_rail.selected_index
+                page.content_area.content = get_view_for_index(idx)
+                page.content_area.update()
+
             show_snack(f"Successfully uploaded {file_name}", "green")
 
         except Exception as ex:
@@ -587,9 +681,10 @@ def main(page: ft.Page):
 
             rows = []
             for doc in docs:
-                file_name = doc[0]
-                upload_date = doc[1]
-                file_path = doc[2]
+                doc_id = doc[0]
+                file_name = doc[1]
+                upload_date = doc[2]
+                file_path = doc[3]
 
                 rows.append(
                     ft.DataRow(
@@ -598,11 +693,19 @@ def main(page: ft.Page):
                             ft.DataCell(ft.Text(file_name)),
                             ft.DataCell(ft.Text(upload_date)),
                             ft.DataCell(
+                            ft.IconButton(
+                                ft.Icons.OPEN_IN_NEW,
+                                tooltip="Open File",
+                                data=file_path,
+                                on_click=open_document_click,
+                                )
+                            ),
+                            ft.DataCell(
                                 ft.IconButton(
-                                    ft.Icons.OPEN_IN_NEW,
-                                    tooltip="Open File",
-                                    data=file_path,
-                                    on_click=open_document_click,
+                                    ft.Icons.DELETE,
+                                    tooltip="Delete",
+                                    data=(doc_id, file_name),
+                                    on_click=delete_document_click,
                                 )
                             ),
                         ]
@@ -630,7 +733,8 @@ def main(page: ft.Page):
                                 ft.DataColumn(ft.Text("Type")),
                                 ft.DataColumn(ft.Text("File Name")),
                                 ft.DataColumn(ft.Text("Date Added")),
-                                ft.DataColumn(ft.Text("Actions")),
+                                ft.DataColumn(ft.Text("Open")),
+                                ft.DataColumn(ft.Text("Delete")),
                             ],
                             rows=rows,
                         ),
