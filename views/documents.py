@@ -7,17 +7,31 @@
 
 # -----------------------------------------------------------------------------
 # PURPOSE:
-# Handles the "Documents" tab.
-# - Lists files uploaded for the patient.
-# - Handles "Collision Detection" (if you upload a file with the same name).
-# - Provides a Search Bar to filter the list.
-# - Confirms deletion and reliably closes the dialog on Delete or Cancel.
+# Documents view for managing patient-associated files.
+#
+# Includes:
+# - Display of uploaded patient documents in a searchable table
+# - Safe document ingestion with filename collision handling
+# - Native OS document opening
+# - Accessible confirmation UI for destructive actions (delete)
+#
+# DESIGN NOTES:
+# - Uses page.overlay for confirmation dialogs to ensure reliable rendering
+#   when the app is mounted under a custom page.root container
+# - Delete confirmations close the UI immediately, then perform filesystem
+#   and database operations asynchronously to avoid blocking the UI thread
+# - Dialogs are non-modal to allow click-outside dismissal where supported
+# - Files are stored encrypted on disk (*.enc); "Open" explicitly decrypts
+#   to a temporary PDF for viewing via the native OS
+# - Document IDs are treated as opaque identifiers; user-facing ordering
+#   is handled via sort/filter logic rather than relying on database IDs
 # -----------------------------------------------------------------------------
 
 import flet as ft
 import os
-import shutil
 import asyncio
+import tempfile
+from crypto_storage import get_or_create_file_master_key, encrypt_bytes, decrypt_bytes
 from datetime import datetime
 
 from database import (
@@ -36,6 +50,71 @@ def get_documents_view(page: ft.Page):
         return ft.Text("No patient loaded.")
     patient_id = patient[0]
 
+    search_field = ft.TextField(
+        label="Search Records",
+        prefix_icon=ft.Icons.SEARCH,
+        width=300,
+        dense=True,
+    )
+
+    if not hasattr(page, "_delete_dialog_open"):
+        page._delete_dialog_open = False
+
+    if not hasattr(page, "_pending_delete"):
+        page._pending_delete = None  
+
+    def close_delete_dlg(_=None):
+        dlg = page._delete_dlg
+        dlg.open = False
+        try:
+            dlg.update()
+        except Exception:
+            pass
+        page._pending_delete = None
+        page._delete_dialog_open = False
+        page.update()
+
+    async def do_delete_async(doc_id: int):
+        try:
+            file_path = get_document_path(page.db_connection, doc_id)
+            delete_document(page.db_connection, doc_id)
+
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception as ex:
+                    print(f"Could not delete file {file_path}: {ex}")
+                    show_snack(page, "Deleted record, but file could not be removed.", "orange")
+
+            refresh_table(search_field.value, update_ui=True)
+            show_snack(page, "Record and file deleted.", "blue")
+        except Exception as ex:
+            print("DELETE ERROR:", ex)
+            show_snack(page, f"Delete failed: {ex}", "red")
+
+    def confirm_delete(_=None):
+        pending = page._pending_delete
+        if not pending:
+            # Should never happen, but don't crash if state is weird
+            close_delete_dlg()
+            return
+        doc_id, _name = pending
+        close_delete_dlg()  # close immediately for UX
+        asyncio.create_task(do_delete_async(int(doc_id)))
+
+    if not hasattr(page, "_delete_dlg") or page._delete_dlg is None:
+        page._delete_dlg = ft.AlertDialog(
+            modal=False,
+            title=ft.Text("Confirm Delete"),
+            content=ft.Text(""),
+            actions=[
+                ft.ElevatedButton("Cancel", on_click=close_delete_dlg),
+                ft.ElevatedButton("Delete", icon=ft.Icons.DELETE, on_click=confirm_delete),
+            ],
+            on_dismiss=close_delete_dlg,
+        )
+        page.overlay.append(page._delete_dlg)
+
     all_docs = []
 
     # 2. CONTROLS
@@ -52,12 +131,6 @@ def get_documents_view(page: ft.Page):
         vertical_lines=ft.border.BorderSide(1, ft.Colors.GREY_200),
     )
 
-    search_field = ft.TextField(
-        label="Search Records",
-        prefix_icon=ft.Icons.SEARCH,
-        width=300,
-        dense=True,
-    )
 
     # --- helper: treat "report.pdf" and "report (1).pdf" as the same base name
     def base_key(filename: str) -> str:
@@ -74,17 +147,64 @@ def get_documents_view(page: ft.Page):
         return (root + ext).lower()
 
     # 3. HELPER FUNCTIONS
-    async def open_doc_async(path: str | None):
-        if path and os.path.exists(path):
-            file_url = "file:///" + path.replace("\\", "/")
-            await ft.UrlLauncher().launch_url(file_url)
-        else:
+    async def open_doc_async(path: str | None, human_name: str = "record.pdf"):
+        if not path or not os.path.exists(path):
             show_snack(page, "File not found.", "red")
+            return
+
+        try:
+            # Decrypt to a temp PDF for viewing
+            fmk = get_or_create_file_master_key(page.db_connection, page.db_password)
+            with open(path, "rb") as f:
+                ciphertext = f.read()
+            plaintext = decrypt_bytes(fmk, ciphertext)
+
+            # Write temp PDF
+            safe_name = human_name if human_name.lower().endswith(".pdf") else f"{human_name}.pdf"
+            tmp_dir = tempfile.gettempdir()
+            tmp_path = os.path.join(tmp_dir, f"lpa_decrypted_{patient_id}_{int(datetime.now().timestamp())}.pdf")
+            with open(tmp_path, "wb") as f:
+                f.write(plaintext)
+
+            file_url = "file:///" + tmp_path.replace("\\", "/")
+            await ft.UrlLauncher().launch_url(file_url)
+
+            show_snack(page, "Opened a temporary decrypted copy (will be cleaned up later).", "orange")
+        except Exception as ex:
+            print("OPEN ERROR:", ex)
+            show_snack(page, f"Open failed: {ex}", "red")
 
     def open_doc_click(e: ft.ControlEvent):
-        path = e.control.data
-        asyncio.create_task(open_doc_async(path))
+        enc_path, human_name = e.control.data
+        asyncio.create_task(open_doc_async(enc_path, human_name))
 
+    def delete_handler(e: ft.ControlEvent):
+        data = getattr(e.control, "data", None)
+        if not data:
+            return
+        doc_id, name = data
+
+        if getattr(page, "_delete_dialog_open", False):
+            return
+        page._delete_dialog_open = True
+
+        page._pending_delete = (int(doc_id), str(name))
+
+        dlg = page._delete_dlg
+        dlg.title = ft.Text("Confirm Delete")
+        dlg.content = ft.Text(
+            f"Permanently delete '{name}'?\n\n"
+            "This removes it from the app and deletes the file from disk."
+        )
+        dlg.open = True
+
+        # Dialog + page update (both helps reliability)
+        try:
+            dlg.update()
+        except Exception:
+            pass
+        page.update()
+    
     def refresh_table(filter_text: str = "", update_ui: bool = False):
         nonlocal all_docs
         rows: list[ft.DataRow] = []
@@ -113,13 +233,14 @@ def get_documents_view(page: ft.Page):
                         ft.DataCell(
                             ft.IconButton(
                                 ft.Icons.OPEN_IN_NEW,
-                                data=file_path,
+                                data=(file_path, file_name),
                                 on_click=open_doc_click,
                             )
                         ),
                         ft.DataCell(
                             ft.IconButton(
-                                ft.Icons.DELETE,
+                                icon=ft.Icons.DELETE,
+                                tooltip="Delete",
                                 data=(doc_id, file_name),
                                 on_click=delete_handler,
                             )
@@ -136,72 +257,6 @@ def get_documents_view(page: ft.Page):
         refresh_table(e.control.value, update_ui=True)
 
     search_field.on_change = on_search_change
-
-    # 4. HANDLERS
-    def delete_handler(e: ft.ControlEvent):
-        data = getattr(e.control, "data", None)
-        if not data:
-            return
-        doc_id, name = data
-
-        # Prevent stacking dialogs if user double-clicks
-        if getattr(page, "_delete_dialog_open", False):
-            return
-        page._delete_dialog_open = True
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Confirm Delete"),
-            content=ft.Text(
-                f"Permanently delete '{name}'?\n\n"
-                "This removes it from the app and deletes the file from disk."
-            ),
-            actions=[],
-        )
-
-        def close_dlg(_=None, d=dlg):
-            # Close
-            d.open = False
-            page.update()
-
-            # Remove from overlay (important)
-            if d in page.overlay:
-                page.overlay.remove(d)
-
-            page._delete_dialog_open = False
-            page.update()
-
-        def confirm(_=None, d=dlg):
-            # ✅ CLOSE FIRST so the dialog always disappears
-            close_dlg(d=d)
-
-            try:
-                # True delete: DB + disk
-                file_path = get_document_path(page.db_connection, int(doc_id))
-                delete_document(page.db_connection, int(doc_id))
-
-                if file_path and os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                    except Exception as ex:
-                        print(f"Could not delete file {file_path}: {ex}")
-                        show_snack(page, "Deleted record, but file could not be removed.", "orange")
-
-                refresh_table(search_field.value, update_ui=True)
-                show_snack(page, "Record and file deleted.", "blue")
-
-            except Exception as ex:
-                print("DELETE ERROR:", ex)
-                show_snack(page, f"Delete failed: {ex}", "red")
-
-        dlg.actions = [
-            ft.TextButton("Cancel", on_click=close_dlg),
-            ft.Button("Delete", icon=ft.Icons.DELETE, on_click=confirm),
-        ]
-
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
 
     # 5. UPLOAD LOGIC
     async def upload_document_click(e: ft.ControlEvent):
@@ -229,46 +284,40 @@ def get_documents_view(page: ft.Page):
         # --- RENAME LOGIC ---
         original_name = picked.name
         file_name = original_name
-        dest_path = os.path.join(dest_dir, file_name)
-
-        # ✅ DB-based duplicate detection (base-name aware)
-        try:
-            existing_docs = get_patient_documents(page.db_connection, patient_id)
-            existing_keys = {base_key(str(d[1])) for d in existing_docs if len(d) > 1 and d[1]}
-        except Exception:
-            existing_keys = set()
-
-        collision_detected = base_key(original_name) in existing_keys
-
         name_root, name_ext = os.path.splitext(file_name)
         counter = 1
 
-        while os.path.exists(dest_path):
+        def enc_target(name: str) -> str:
+            return os.path.join(dest_dir, name + ".enc")
+
+        # Avoid overwriting existing encrypted files
+        while os.path.exists(enc_target(file_name)):
             file_name = f"{name_root} ({counter}){name_ext}"
-            dest_path = os.path.join(dest_dir, file_name)
             counter += 1
 
-        # ✅ If we had to rename, it is also a duplicate/collision
-        if counter > 1:
-            collision_detected = True
-        # --------------------
+        enc_path = enc_target(file_name)
 
+        # --- ENCRYPT + STORE ---
         try:
-            shutil.copy(src_path, dest_path)
+            with open(src_path, "rb") as f:
+                plaintext = f.read()
+
+            fmk = get_or_create_file_master_key(page.db_connection, page.db_password)
+            ciphertext = encrypt_bytes(fmk, plaintext)
+
+            with open(enc_path, "wb") as f:
+                f.write(ciphertext)
+
             add_document(
                 page.db_connection,
                 patient_id,
-                file_name,
-                dest_path,
+                file_name,     # human label
+                enc_path,      # encrypted disk path
                 datetime.now().strftime("%Y-%m-%d %H:%M"),
             )
-            refresh_table(search_field.value, update_ui=True)
 
-            # Duplicate-aware message
-            if collision_detected:
-                show_snack(page, f"Duplicate file detected. Creating {file_name}.", "orange")
-            else:
-                show_snack(page, "Uploaded successfully.", "green")
+            refresh_table(search_field.value, update_ui=True)
+            show_snack(page, "Document uploaded securely.", "blue")
 
         except Exception as ex:
             print(f"Upload Error: {ex}")
